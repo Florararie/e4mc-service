@@ -1,0 +1,25 @@
+[Unit]
+Description=e4mc link watcher (local tunnel link -> GitHub Pages redirect)
+Documentation=file:@PREFIX@/README.md
+Wants=network-online.target
+After=network-online.target e4mc-tunnel.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PREFIX@
+EnvironmentFile=-/etc/e4mc/e4mc.env
+Environment=STATE_DIR=@STATE_DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@PREFIX@/.venv/bin/python -m e4mc_watcher
+Restart=always
+RestartSec=10
+StateDirectory=e4mc
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

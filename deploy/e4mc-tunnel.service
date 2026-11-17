@@ -1,0 +1,26 @@
+[Unit]
+Description=e4mc tunnel (public QUIClime relay -> local Minecraft server)
+Documentation=file:@PREFIX@/README.md
+Wants=network-online.target
+After=network-online.target
+Before=e4mc-watcher.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PREFIX@
+EnvironmentFile=-/etc/e4mc/e4mc.env
+Environment=STATE_DIR=@STATE_DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@PREFIX@/.venv/bin/python -m e4mc_tunnel
+Restart=always
+RestartSec=5
+StateDirectory=e4mc
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
