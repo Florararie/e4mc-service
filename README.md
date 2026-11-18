@@ -158,10 +158,31 @@ the repository, so a stable link produces no commits.
 3. Point `--repo` at it; the watcher creates `index.html` on its first run and
    Pages serves it about a minute later.
 
-The page redirects to `minecraft://<address>` (via meta refresh and script) and
-also prints the address. Browsers cannot launch Minecraft from a web page, so
-the printed address is the reliable path; `REDIRECT_URL_TEMPLATE` lets you
-change the scheme.
+The page asks the browser to open `minecraft://<address>` (meta refresh and
+script) and shows the bare address with a copy button. Browsers usually cannot
+launch Minecraft from a web page, so the printed address is the reliable path;
+`REDIRECT_URL_TEMPLATE` lets you change the scheme.
+
+### The Pages URL is not a server address
+
+`https://<owner>.github.io/<repo>/` serves a web page, and Minecraft's Direct
+Connection never fetches it: what you type is taken as a hostname and looked up
+in DNS. No Pages URL can work, at the root or under a path, and an HTTP
+redirect cannot help, because the client never makes an HTTP request. DNS is
+the only layer that can redirect a Minecraft connection.
+
+| Typed into Direct Connection | What happens |
+| --- | --- |
+| `https://owner.github.io/repo` | invalid address, so Join Server stays greyed out |
+| `owner.github.io/repo` | `/repo` is read as part of the hostname, so DNS fails: "Unknown host" |
+| `word-word.na.e4mc.link` | correct: the relay's hostname |
+
+The Pages site is where players look the address up; the address itself is what
+they paste. Moving the page into an `owner.github.io` repository does not help
+(the root hostname resolves to GitHub's web servers, not to the relay), and
+doing it in the repository that also publishes a resource pack is a bad idea:
+the watcher would rewrite `index.html` there and the pack's force-push would
+overwrite that commit.
 
 ## Configuration
 
@@ -207,5 +228,5 @@ mcstatus word-word.na.e4mc.link status
   expired token keeps retrying and logs the API error each poll.
 * One install serves one address. A second Minecraft server needs its own copy
   with renamed units and a separate state directory.
-* The browser redirect cannot start Minecraft; the visible address is the
-  dependable route.
+* A GitHub Pages URL can never be typed into Minecraft, only the bare e4mc
+  hostname works; the page exists to display it.

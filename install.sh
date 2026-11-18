@@ -187,6 +187,9 @@ Next:
   2. Watch the first assignment:  journalctl -u e4mc-tunnel -f
   3. Watch the page update:       journalctl -u e4mc-watcher -f
 
+Players connect with the address the page shows, not the page URL: Minecraft
+needs a bare hostname, so https:// and /path cannot be typed into it.
+
 Edit $ENV_FILE and run 'systemctl restart e4mc-tunnel e4mc-watcher' to reconfigure.
 Remove everything again with 'sudo $PREFIX/uninstall.sh' (add --purge to also
 remove the config, the state and the service account).
