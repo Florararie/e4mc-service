@@ -32,7 +32,7 @@ usage() {
 Usage: sudo ./install.sh --repo owner/name (--token-file PATH | --token VALUE) [options]
 
 Required on first install:
-  --repo OWNER/NAME     GitHub repository whose Pages site gets the redirect
+  --repo OWNER/NAME     GitHub repository whose Pages site gets the page
   --token-file PATH     file holding a token with Contents: Read and write
   --token VALUE         the token itself (prefer --token-file)
 
@@ -149,6 +149,7 @@ GITHUB_TOKEN=$GITHUB_TOKEN
 PAGES_REPO=$PAGES_REPO
 PAGES_BRANCH=$PAGES_BRANCH
 PAGES_PATH=$PAGES_PATH
+PAGES_COMMIT_AUTHOR="GitHub <noreply@github.com>"
 PAGE_AUTHOR=Florararie
 POLL_INTERVAL=5
 STATE_MAX_AGE=90

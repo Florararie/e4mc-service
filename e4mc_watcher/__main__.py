@@ -3,7 +3,9 @@
 Both processes run on the same machine as the Minecraft server. The tunnel
 writes the address it currently holds to ``STATE_DIR/state.json``; this watcher
 reads that file, and publishes a landing page only when the visible address
-changes. Nothing leaves the machine except the GitHub commit.
+changes. Nothing leaves the machine except the GitHub commit, which is amended
+in place, so a service that runs for months still leaves one entry in the Pages
+history.
 
 A link is only trusted while it is fresh: ``connected`` must be true and the
 heartbeat must be recent, so a watcher restarting next to a stopped or crashed
@@ -48,6 +50,23 @@ def _env_float(name: str, default: float) -> float:
         raise SystemExit(f"{name} must be a number, got {raw!r}") from exc
 
 
+DEFAULT_COMMIT_AUTHOR = "GitHub <noreply@github.com>"
+
+
+def parse_identity(raw: str) -> tuple[str, str]:
+    """Split ``Name <email>`` into the pair GitHub's commit API expects."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1].strip()
+    name, separator, rest = raw.partition("<")
+    email = rest.strip()
+    if not separator or not name.strip() or not email.endswith(">") or "@" not in email:
+        raise SystemExit(
+            f'PAGES_COMMIT_AUTHOR must look like "Name <email>", got {raw!r}'
+        )
+    return name.strip(), email[:-1].strip()
+
+
 @dataclass(frozen=True)
 class WatcherConfig:
     state_dir: Path
@@ -59,10 +78,15 @@ class WatcherConfig:
     poll_interval: float
     domain_suffix: str
     author: str
+    commit_author_name: str
+    commit_author_email: str
     commit_message: str
 
     @classmethod
     def from_env(cls) -> "WatcherConfig":
+        commit_author_name, commit_author_email = parse_identity(
+            _env("PAGES_COMMIT_AUTHOR", DEFAULT_COMMIT_AUTHOR)
+        )
         return cls(
             state_dir=default_state_dir(),
             state_max_age=max(5.0, _env_float("STATE_MAX_AGE", 90.0)),
@@ -73,6 +97,8 @@ class WatcherConfig:
             poll_interval=max(1.0, _env_float("POLL_INTERVAL", 5.0)),
             domain_suffix=_env("DOMAIN_SUFFIX", ".e4mc.link") or ".e4mc.link",
             author=_env("PAGE_AUTHOR", "Florararie") or "Florararie",
+            commit_author_name=commit_author_name,
+            commit_author_email=commit_author_email,
             commit_message=_env(
                 "PAGES_COMMIT_MESSAGE", "Update the Minecraft address on the page"
             )
@@ -155,12 +181,17 @@ PAGE = """<!doctype html>
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    padding: 3.5rem 1.25rem 2.5rem;
+    padding: 2.5rem 1.25rem;
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
     background: var(--bg);
     color: var(--fg);
     font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  main { max-width: 33rem; margin: 0 auto; }
+  main { width: 100%; max-width: 33rem; margin: 0 auto; }
   h1 { margin: 0 0 .35rem; font-size: 1.35rem; line-height: 1.3; letter-spacing: -.01em; }
   .lede { margin: 0 0 1.6rem; color: var(--muted); }
   .address {
@@ -201,7 +232,7 @@ PAGE = """<!doctype html>
   }
   footer p { margin: .2rem 0; }
   @media (max-width: 26rem) {
-    body { padding-top: 2.25rem; }
+    body { padding: 1.75rem 1.25rem; }
     .address { font-size: 1rem; }
   }
 </style>
@@ -285,33 +316,132 @@ def _api(config: WatcherConfig, method: str, url: str, payload: dict | None = No
     return json.loads(body) if body else {}
 
 
-def sync_page(config: WatcherConfig, content: bytes) -> bool:
-    """Make ``PAGES_PATH`` equal ``content``; return True if a commit was made."""
+def _branch_url(config: WatcherConfig) -> str:
+    branch = urllib.parse.quote(config.branch, safe="/")
+    return f"{GITHUB_API}/repos/{config.repo}/git/ref/heads/{branch}"
+
+
+def _head_commit(config: WatcherConfig) -> dict | None:
+    """Return the tip commit of the Pages branch, or None while it is unborn."""
+    try:
+        ref = _api(config, "GET", _branch_url(config))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 409):
+            return None
+        raise
+    sha = str((ref.get("object") or {}).get("sha") or "").strip()
+    if not sha:
+        return None
+    commit = _api(config, "GET", f"{GITHUB_API}/repos/{config.repo}/git/commits/{sha}")
+    commit["sha"] = sha
+    return commit
+
+
+def sync_page(config: WatcherConfig, content: bytes) -> str | None:
+    """Make ``PAGES_PATH`` equal ``content``.
+
+    Returns None when the published file is already identical, otherwise
+    ``"amended"`` or ``"committed"``. The watcher keeps its own tip commit
+    amended, so an installation that runs indefinitely still leaves one entry
+    in the Pages history. A commit it did not write is never rewritten: the
+    page commit is then simply added on top of it.
+    """
     url = f"{GITHUB_API}/repos/{config.repo}/contents/{urllib.parse.quote(config.path)}"
+    branch = urllib.parse.quote(config.branch, safe="/")
     existing: dict | None
     try:
-        existing = _api(config, "GET", f"{url}?ref={urllib.parse.quote(config.branch)}")
+        existing = _api(config, "GET", f"{url}?ref={branch}")
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
             raise
         existing = None
-
-    payload: dict = {
-        "message": config.commit_message,
-        "content": base64.b64encode(content).decode("ascii"),
-        "branch": config.branch,
-    }
-    if existing:
-        payload["sha"] = existing.get("sha")
+    if existing is not None:
         try:
             current = base64.b64decode(existing.get("content") or "")
         except (ValueError, TypeError):
             current = b""
         if current == content:
-            return False
+            return None
 
-    _api(config, "PUT", url, payload)
-    return True
+    head = _head_commit(config)
+    # Only rewrite a commit this watcher wrote itself, identified by its
+    # message; anything else (your own edits, a merge) gets a normal commit on
+    # top, so nothing published by hand is ever discarded.
+    amend = bool(
+        head
+        and len(head.get("parents") or []) <= 1
+        and str(head.get("message") or "").strip() == config.commit_message.strip()
+    )
+
+    blob = _api(
+        config,
+        "POST",
+        f"{GITHUB_API}/repos/{config.repo}/git/blobs",
+        {"content": content.decode("utf-8"), "encoding": "utf-8"},
+    )
+    tree_payload: dict = {
+        "tree": [
+            {
+                "path": config.path,
+                "mode": "100644",
+                "type": "blob",
+                "sha": blob["sha"],
+            }
+        ]
+    }
+    if head and (head.get("tree") or {}).get("sha"):
+        tree_payload["base_tree"] = head["tree"]["sha"]
+    tree = _api(
+        config, "POST", f"{GITHUB_API}/repos/{config.repo}/git/trees", tree_payload
+    )
+
+    identity = {"name": config.commit_author_name, "email": config.commit_author_email}
+    if head is None:
+        parents: list[str] = []
+    elif amend:
+        parents = [
+            str((parent or {}).get("sha") or "")
+            for parent in head.get("parents") or []
+        ]
+    else:
+        parents = [str(head["sha"])]
+
+    commit = _api(
+        config,
+        "POST",
+        f"{GITHUB_API}/repos/{config.repo}/git/commits",
+        {
+            "message": config.commit_message,
+            "tree": tree["sha"],
+            "parents": [sha for sha in parents if sha],
+            "author": identity,
+            "committer": identity,
+        },
+    )
+
+    if head is None:
+        _api(
+            config,
+            "POST",
+            f"{GITHUB_API}/repos/{config.repo}/git/refs",
+            {"ref": f"refs/heads/{config.branch}", "sha": commit["sha"]},
+        )
+        return "committed"
+
+    # Rewriting the tip is a force update, so refuse if somebody else moved the
+    # branch between our read and our write.
+    fresh = _head_commit(config)
+    if fresh is None or fresh.get("sha") != head.get("sha"):
+        raise RuntimeError(
+            "the branch moved while publishing; will retry on the next poll"
+        )
+    _api(
+        config,
+        "PATCH",
+        _branch_url(config),
+        {"sha": commit["sha"], "force": amend},
+    )
+    return "amended" if amend else "committed"
 
 
 # -- main loop ---------------------------------------------------------------
@@ -344,12 +474,12 @@ def run(config: WatcherConfig, *, dry_run: bool = False, once: bool = False) -> 
                         LOG.info("would serve %s for %s", domain, config.path)
                         print(content.decode("utf-8"))
                     else:
-                        changed = sync_page(config, content)
+                        action = sync_page(config, content)
                         LOG.info(
-                            "%s now redirects from %s (%s)",
+                            "%s now shows %s (%s)",
                             config.path,
                             domain,
-                            "committed" if changed else "already current",
+                            action or "already current",
                         )
                     last_domain = domain
                 else:

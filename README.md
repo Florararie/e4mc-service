@@ -147,7 +147,18 @@ tunnel has reconnected, it leaves the old page alone instead of publishing a
 dead address.
 
 The commit only happens when the rendered page differs from the file already in
-the repository, so a stable link produces no commits.
+the repository, so a stable link produces no commits. When it does commit, the
+watcher amends its own previous commit instead of adding another one, so the
+Pages branch keeps a single entry however many times the address changes. It
+recognises that commit by the message it wrote, and it always builds the new
+tree on the branch's current one, so commits you push by hand are never
+rewritten: they stay, and the page commit is added on top of them.
+
+Commits are authored and committed as `GitHub <noreply@github.com>` by default,
+the identity GitHub's own web editor and API use, so the history does not name
+the account whose token runs the service. Set `PAGES_COMMIT_AUTHOR` to a
+`Name <email>` pair to attribute them differently; the branch still holds one
+commit either way.
 
 ## GitHub setup
 
@@ -204,6 +215,8 @@ See `.env.example` for the annotated list. The ones that usually matter:
 | `HEARTBEAT_INTERVAL` | `20` | state refresh while connected |
 | `GITHUB_TOKEN`, `PAGES_REPO` | none | required for commits |
 | `PAGES_BRANCH`, `PAGES_PATH` | `main`, `index.html` | where the page lives |
+| `PAGES_COMMIT_AUTHOR` | `GitHub <noreply@github.com>` | author and committer of the page commit |
+| `PAGES_COMMIT_MESSAGE` | built-in | message of that commit, and how the watcher recognises its own |
 | `PAGE_AUTHOR` | `Florararie` | GitHub username credited in the page footer |
 | `POLL_INTERVAL` | `5` | how often the watcher reads local state |
 | `STATE_MAX_AGE` | `90` | freshness required before publishing |
