@@ -108,6 +108,22 @@ if [[ -f $ENV_FILE && $FORCE -ne 1 ]]; then
     log "keeping existing $ENV_FILE (use --force to rewrite it)"
 fi
 
+if [[ $WRITE_ENV -eq 0 ]]; then
+    # The effective configuration is now whatever the kept file says, so use
+    # those values for the watcher decision and the summary below instead of
+    # the flags this run happened not to get.
+    env_value() {
+        awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE"
+    }
+    PAGES_REPO=$(env_value PAGES_REPO)
+    PAGES_BRANCH=$(env_value PAGES_BRANCH)
+    PAGES_PATH=$(env_value PAGES_PATH)
+    GITHUB_TOKEN=$(env_value GITHUB_TOKEN)
+    WEBHOOK_URL=$(env_value DISCORD_WEBHOOK_URL)
+    : "${PAGES_BRANCH:=main}"
+    : "${PAGES_PATH:=index.html}"
+fi
+
 if [[ $WRITE_ENV -eq 1 ]]; then
     if [[ -n $PAGES_REPO || -n $GITHUB_TOKEN ]]; then
         [[ $PAGES_REPO =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] ||
@@ -183,13 +199,9 @@ EOF
     chmod 0600 "$ENV_FILE"
 fi
 
-# The watcher is only worth installing when it has somewhere to publish. When
-# re-running against an existing env file, read the answer from that file.
+# The watcher is only worth installing when it has somewhere to publish.
 WATCHER=0
 if [[ -n $PAGES_REPO || -n $GITHUB_TOKEN || -n $WEBHOOK_URL ]]; then
-    WATCHER=1
-elif [[ $WRITE_ENV -eq 0 ]] &&
-    grep -Eq '^(GITHUB_TOKEN|PAGES_REPO|DISCORD_WEBHOOK_URL)=.+' "$ENV_FILE"; then
     WATCHER=1
 fi
 
@@ -245,7 +257,7 @@ else
 fi
 
 printf '\nNext:\n'
-if [[ -n $PAGES_REPO ]]; then
+if [[ -n $PAGES_REPO && $WRITE_ENV -eq 1 ]]; then
     printf '  1. Enable Pages once at https://github.com/%s/settings/pages\n' "$PAGES_REPO"
     printf '     (Deploy from a branch: %s / root).\n' "$PAGES_BRANCH"
 fi
