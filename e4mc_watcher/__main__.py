@@ -1,21 +1,26 @@
-"""``python -m e4mc_watcher`` -- mirror the tunnel's link onto GitHub Pages.
+"""``python -m e4mc_watcher`` -- mirror the tunnel's link onto Pages and/or Discord.
 
 Both processes run on the same machine as the Minecraft server. The tunnel
 writes the address it currently holds to ``STATE_DIR/state.json``; this watcher
-reads that file, and publishes a landing page only when the visible address
-changes. Nothing leaves the machine except the GitHub commit, which is amended
-in place, so a service that runs for months still leaves one entry in the Pages
+reads that file and publishes the address wherever it has been told to: a
+GitHub Pages landing page, a Discord webhook, both, or neither. The destinations
+are independent, so a tunnel can be paired with any combination of them.
+
+Nothing leaves the machine except those posts, and the page commit is amended in
+place, so a service that runs for months still leaves one entry in the Pages
 history.
 
-A link is only trusted while it is fresh: ``connected`` must be true and the
-heartbeat must be recent, so a watcher restarting next to a stopped or crashed
-tunnel never republishes a dead address.
+A link is only *live* while it is fresh: ``connected`` must be true and the
+heartbeat must be recent. A known-but-stale address is still shown, clearly
+marked offline, so anyone opening the page can tell at a glance whether the
+server is up right now.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +39,9 @@ from e4mc_tunnel.protocol import normalize_domain
 LOG = logging.getLogger("e4mc.watcher")
 USER_AGENT = "e4mc-watcher/2.0"
 GITHUB_API = "https://api.github.com"
+RECORD_NAME = "published.json"
+DISCORD_LIVE_COLOR = 0x57F287
+WEBHOOK_RETRY_SECONDS = 60.0
 
 
 def _env(name: str, default: str = "") -> str:
@@ -81,17 +89,48 @@ class WatcherConfig:
     commit_author_name: str
     commit_author_email: str
     commit_message: str
+    webhook_url: str
+
+    @property
+    def pages_enabled(self) -> bool:
+        return bool(self.repo and self.token)
+
+    @property
+    def webhook_enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    @property
+    def publishing(self) -> bool:
+        return self.pages_enabled or self.webhook_enabled
 
     @classmethod
     def from_env(cls) -> "WatcherConfig":
         commit_author_name, commit_author_email = parse_identity(
             _env("PAGES_COMMIT_AUTHOR", DEFAULT_COMMIT_AUTHOR)
         )
+        repo = _env("PAGES_REPO")
+        token = _env("GITHUB_TOKEN")
+        webhook = _env("DISCORD_WEBHOOK_URL")
+        if bool(repo) != bool(token):
+            raise SystemExit(
+                "GITHUB_TOKEN and PAGES_REPO must be set together (both or "
+                "neither); PAGES_REPO is the repository as owner/name and the "
+                "token needs Contents: Read and write on it."
+            )
+        if repo and "/" not in repo:
+            raise SystemExit(
+                f"PAGES_REPO must be the repository as owner/name, got {repo!r}"
+            )
+        if webhook and not webhook.startswith("https://"):
+            raise SystemExit(
+                "DISCORD_WEBHOOK_URL must be the https:// webhook link Discord "
+                "gave you (Channel settings -> Integrations -> Webhooks)"
+            )
         return cls(
             state_dir=default_state_dir(),
             state_max_age=max(5.0, _env_float("STATE_MAX_AGE", 90.0)),
-            token=_env("GITHUB_TOKEN"),
-            repo=_env("PAGES_REPO"),
+            token=token,
+            repo=repo,
             branch=_env("PAGES_BRANCH", "main") or "main",
             path=_env("PAGES_PATH", "index.html") or "index.html",
             poll_interval=max(1.0, _env_float("POLL_INTERVAL", 5.0)),
@@ -103,51 +142,70 @@ class WatcherConfig:
                 "PAGES_COMMIT_MESSAGE", "Update the Minecraft address on the page"
             )
             or "Update the Minecraft address on the page",
+            webhook_url=webhook,
         )
 
 
 # -- reading the link from the local tunnel ----------------------------------
 
 
-def _age_seconds(stamp: object) -> float | None:
-    if not isinstance(stamp, str) or not stamp.strip():
+def _stamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
         return None
     try:
-        moment = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _age_seconds(stamp: object) -> float | None:
+    moment = _stamp(stamp)
+    if moment is None:
+        return None
     return max(0.0, (datetime.now(timezone.utc) - moment).total_seconds())
 
 
-def read_link(config: WatcherConfig) -> tuple[str | None, str]:
-    """Return ``(domain, "")`` for a fresh link, or ``(None, reason)``."""
+def read_state(config: WatcherConfig) -> tuple[str | None, bool, str]:
+    """Return ``(domain, live, reason)`` for the tunnel's current state.
+
+    ``domain`` is the address the tunnel holds, even while it is disconnected;
+    ``live`` says whether that address is usable right now. ``reason`` explains
+    a ``None`` domain, and is empty in every other case.
+    """
     path = config.state_dir / "state.json"
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None, f"no state at {path} yet"
+        return None, False, f"no state at {path} yet"
     except (OSError, ValueError) as exc:
-        return None, f"cannot read {path}: {exc}"
+        return None, False, f"cannot read {path}: {exc}"
     if not isinstance(document, dict):
-        return None, f"{path} is not a JSON object"
-    if document.get("connected") is not True:
-        return None, "the tunnel is not connected"
-
-    age = _age_seconds(document.get("heartbeat_at") or document.get("updated_at"))
-    if age is None:
-        return None, "state has no usable timestamp"
-    if age > config.state_max_age:
-        return None, f"state is {age:.0f}s old (limit {config.state_max_age:.0f}s)"
+        return None, False, f"{path} is not a JSON object"
 
     domain = normalize_domain(document.get("domain"), config.domain_suffix)
     if domain is None:
-        return None, f"state holds an unusable domain: {document.get('domain')!r}"
-    return domain, ""
+        return None, False, f"state holds an unusable domain: {document.get('domain')!r}"
+    if document.get("connected") is not True:
+        return domain, False, ""
+
+    age = _age_seconds(document.get("heartbeat_at") or document.get("updated_at"))
+    if age is None:
+        return domain, False, "state has no usable timestamp"
+    if age > config.state_max_age:
+        return domain, False, f"state is {age:.0f}s old (limit {config.state_max_age:.0f}s)"
+    return domain, True, ""
 
 
 # -- the landing page --------------------------------------------------------
+
+OFFLINE_NOTE = (
+    '<p class="note offline">The tunnel is offline right now. This is the last '
+    "address it published, so joining may fail until the server is back and this "
+    "page has refreshed.</p>"
+)
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -155,44 +213,99 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="e4mc-domain" content="__DOMAIN__">
+<meta name="e4mc-status" content="__STATUS__">
 <meta name="robots" content="noindex">
 <meta http-equiv="refresh" content="60">
 <title>__DOMAIN__ · Minecraft server</title>
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #ffffff;
+    --bg: #eef0f3;
+    --card: #ffffff;
     --fg: #14161a;
     --muted: #5b616b;
     --panel: #f5f6f7;
-    --line: #d8dbe0;
+    --line: #dfe3e8;
     --focus: #33663f;
+    --ok: #16a34a;
+    --ok-ring: rgba(22, 163, 74, .16);
+    --ok-text: #15803d;
+    --bad: #dc2626;
+    --bad-ring: rgba(220, 38, 38, .16);
+    --bad-text: #b91c1c;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 18px 36px -14px rgba(16, 24, 40, .22);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #101215;
+      --bg: #0a0c0e;
+      --card: #14171b;
       --fg: #eceef1;
       --muted: #9aa1ab;
-      --panel: #181b1f;
-      --line: #2b3036;
+      --panel: #1b1f24;
+      --line: #2a2f36;
       --focus: #8fd39b;
+      --ok: #4ade80;
+      --ok-ring: rgba(74, 222, 128, .18);
+      --ok-text: #86efac;
+      --bad: #f87171;
+      --bad-ring: rgba(248, 113, 113, .18);
+      --bad-text: #fca5a5;
+      --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 24px 48px -18px rgba(0, 0, 0, .7);
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    padding: 2.5rem 1.25rem;
+    padding: clamp(1.25rem, 4vw, 3rem);
     min-height: 100vh;
     min-height: 100dvh;
     display: flex;
     flex-direction: column;
-    justify-content: center;
     background: var(--bg);
     color: var(--fg);
     font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  main { width: 100%; max-width: 33rem; margin: 0 auto; }
-  h1 { margin: 0 0 .35rem; font-size: 1.35rem; line-height: 1.3; letter-spacing: -.01em; }
+  main {
+    width: 100%;
+    max-width: 34rem;
+    margin: auto;
+    padding: clamp(1.5rem, 4.5vw, 2.4rem);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 1.125rem;
+    box-shadow: var(--shadow);
+  }
+  h1 { margin: 0 0 .5rem; font-size: 1.35rem; line-height: 1.3; letter-spacing: -.01em; }
+  .status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .45rem;
+    margin: 0 0 1.5rem;
+    color: var(--muted);
+    font-size: .9rem;
+  }
+  .status .state { font-weight: 600; }
+  .status[data-state="live"] .state { color: var(--ok-text); }
+  .status[data-state="offline"] .state { color: var(--bad-text); }
+  .status .sep { opacity: .45; }
+  .status time { font-variant-numeric: tabular-nums; }
+  .dot {
+    width: .55rem;
+    height: .55rem;
+    flex: none;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .status[data-state="live"] .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-ring); }
+  .status[data-state="offline"] .dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-ring); }
+  @media (prefers-reduced-motion: no-preference) {
+    .status[data-state="live"] .dot { animation: pulse 2.4s ease-in-out infinite; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 3px var(--ok-ring); }
+      50% { box-shadow: 0 0 0 7px rgba(74, 222, 128, 0); }
+    }
+  }
   .lede { margin: 0 0 1.6rem; color: var(--muted); }
   .address {
     display: block;
@@ -205,6 +318,7 @@ PAGE = """<!doctype html>
     overflow-wrap: anywhere;
     user-select: all;
   }
+  .address[data-state="offline"] { color: var(--muted); border-style: dashed; }
   .actions { margin: .75rem 0 0; }
   button {
     min-height: 2.75rem;
@@ -222,9 +336,14 @@ PAGE = """<!doctype html>
   button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .note { margin: 1.4rem 0 0; color: var(--muted); font-size: .95rem; }
   .note code { font-size: .92em; }
+  .note.offline {
+    margin-top: 1.2rem;
+    padding-left: .85rem;
+    border-left: 2px solid var(--bad);
+  }
   a { color: inherit; text-underline-offset: 2px; }
   footer {
-    margin-top: 2.75rem;
+    margin-top: 2.4rem;
     padding-top: 1.15rem;
     border-top: 1px solid var(--line);
     color: var(--muted);
@@ -232,7 +351,8 @@ PAGE = """<!doctype html>
   }
   footer p { margin: .2rem 0; }
   @media (max-width: 26rem) {
-    body { padding: 1.75rem 1.25rem; }
+    body { padding: 1rem .9rem; }
+    main { padding: 1.35rem 1.2rem; }
     .address { font-size: 1rem; }
   }
 </style>
@@ -240,10 +360,18 @@ PAGE = """<!doctype html>
 <body>
 <main>
   <h1>Minecraft server</h1>
+  <p class="status" data-state="__STATUS__">
+    <span class="dot" aria-hidden="true"></span>
+    <span class="state">__STATUS_LABEL__</span>
+    <span class="sep" aria-hidden="true">&middot;</span>
+    <span class="updated">Last changed
+    <time datetime="__CHANGED_ISO__" title="__CHANGED_HUMAN__" data-relative>__CHANGED_HUMAN__</time></span>
+  </p>
   <p class="lede">Paste this address into Minecraft to join.</p>
 
-  <code class="address" id="address">__DOMAIN__</code>
+  <code class="address" id="address" data-state="__STATUS__">__DOMAIN__</code>
   <p class="actions"><button id="copy" type="button">Copy address</button></p>
+  __OFFLINE_NOTE__
 
   <p class="note"><strong>Multiplayer &rarr; Direct Connection</strong>, paste,
   then <em>Join Server</em>. Use the address, not this page's URL: Minecraft
@@ -282,18 +410,121 @@ button.addEventListener("click", async () => {
   button.textContent = copied ? "Copied" : "Selected, press Ctrl/Cmd+C";
   setTimeout(() => { button.textContent = label; }, 2200);
 });
+
+const stamp = document.querySelector("time[data-relative]");
+if (stamp) {
+  const when = new Date(stamp.getAttribute("datetime"));
+  const units = [
+    ["year", 31557600], ["month", 2629800], ["week", 604800],
+    ["day", 86400], ["hour", 3600], ["minute", 60]
+  ];
+  const phrase = () => {
+    const seconds = Math.max(0, (Date.now() - when.getTime()) / 1000);
+    if (!isFinite(seconds) || seconds < 45) return "just now";
+    for (const [unit, size] of units) {
+      if (seconds >= size) {
+        const count = Math.round(seconds / size);
+        return count + " " + unit + (count === 1 ? "" : "s") + " ago";
+      }
+    }
+    return "just now";
+  };
+  const paint = () => { stamp.textContent = phrase(); };
+  paint();
+  setInterval(paint, 30000);
+}
 </script>
 </body>
 </html>
 """
 
 
-def render_page(domain: str, config: WatcherConfig) -> str:
+def render_page(
+    domain: str, config: WatcherConfig, *, live: bool, changed_at: datetime
+) -> str:
+    changed_at = changed_at.astimezone(timezone.utc)
     return (
-        PAGE.replace("__DOMAIN__", escape(domain))
+        PAGE.replace("__STATUS__", "live" if live else "offline")
+        .replace("__STATUS_LABEL__", "Live" if live else "Offline")
+        .replace("__CHANGED_ISO__", changed_at.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        .replace("__CHANGED_HUMAN__", changed_at.strftime("%d %b %Y, %H:%M UTC"))
+        .replace("__OFFLINE_NOTE__", "" if live else OFFLINE_NOTE)
+        .replace("__DOMAIN__", escape(domain))
         .replace("__AUTHOR_PATH__", urllib.parse.quote(config.author, safe=""))
         .replace("__AUTHOR__", escape(config.author))
     )
+
+
+# -- remembering what was already published ----------------------------------
+
+
+def _record_path(config: WatcherConfig) -> Path:
+    return config.state_dir / RECORD_NAME
+
+
+def _load_record(config: WatcherConfig) -> dict:
+    try:
+        data = json.loads(_record_path(config).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_record(config: WatcherConfig, record: dict) -> None:
+    path = _record_path(config)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, path)
+    except OSError as exc:
+        LOG.warning("cannot record the published state in %s: %s", path, exc)
+
+
+# -- Discord webhook ---------------------------------------------------------
+
+
+def _post_webhook(config: WatcherConfig, domain: str) -> bool:
+    """Post one address to the configured webhook; False means retry later."""
+    payload = {
+        "username": "e4mc",
+        "allowed_mentions": {"parse": []},
+        "embeds": [
+            {
+                "title": "Minecraft server is live",
+                "description": f"`{domain}`",
+                "color": DISCORD_LIVE_COLOR,
+                "footer": {"text": "e4mc tunnel"},
+            }
+        ],
+    }
+    request = urllib.request.Request(
+        config.webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = ""
+        LOG.warning("Discord refused the webhook post (HTTP %s): %s", exc.code, detail)
+        return False
+    except Exception as exc:  # network trouble: try again on a later poll
+        LOG.warning("Discord webhook post failed: %s", exc)
+        return False
+    LOG.info("posted %s to the Discord webhook", domain)
+    return True
 
 
 # -- GitHub Pages ------------------------------------------------------------
@@ -510,35 +741,72 @@ def _report_http_error(exc: urllib.error.HTTPError) -> None:
     )
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
 def run(config: WatcherConfig, *, dry_run: bool = False, once: bool = False) -> int:
-    last_domain: str | None = None
     last_reason: str | None = None
+    webhook_retry_at = 0.0
+    first_poll = True
     while True:
         started = time.monotonic()
         try:
-            domain, reason = read_link(config)
+            domain, live, reason = read_state(config)
             if domain is None:
-                if reason != last_reason:
-                    LOG.info("holding the page: %s", reason)
-                last_reason = reason
+                if reason and reason != last_reason:
+                    LOG.info("nothing to publish yet: %s", reason)
+                last_reason = reason or None
             else:
                 last_reason = None
-                if domain != last_domain:
-                    content = render_page(domain, config).encode("utf-8")
-                    if dry_run:
-                        LOG.info("would serve %s for %s", domain, config.path)
-                        print(content.decode("utf-8"))
-                    else:
+                record = _load_record(config)
+                dirty = False
+                if record.get("domain") != domain:
+                    record["domain"] = domain
+                    record["changed_at"] = _now().isoformat()
+                    dirty = True
+                changed_at = _stamp(record.get("changed_at")) or _now()
+
+                page = render_page(domain, config, live=live, changed_at=changed_at)
+                content = page.encode("utf-8")
+                if dry_run:
+                    LOG.info(
+                        "would serve %s for %s (%s)",
+                        domain,
+                        config.path,
+                        "live" if live else "offline",
+                    )
+                    print(page)
+                else:
+                    digest = hashlib.sha256(content).hexdigest()
+                    if config.pages_enabled and (
+                        first_poll or record.get("published_sha256") != digest
+                    ):
                         action = sync_page(config, content)
+                        record["published_sha256"] = digest
+                        dirty = True
                         LOG.info(
-                            "%s now shows %s (%s)",
+                            "%s now shows %s (%s, %s)",
                             config.path,
                             domain,
+                            "live" if live else "offline",
                             action or "already current",
                         )
-                    last_domain = domain
-                else:
-                    LOG.debug("link unchanged: %s", domain)
+                    if (
+                        config.webhook_enabled
+                        and live
+                        and record.get("webhook_domain") != domain
+                        and time.monotonic() >= webhook_retry_at
+                    ):
+                        if _post_webhook(config, domain):
+                            record["webhook_domain"] = domain
+                            dirty = True
+                        else:
+                            webhook_retry_at = time.monotonic() + WEBHOOK_RETRY_SECONDS
+                    if dirty:
+                        _save_record(config, record)
+                    LOG.debug("poll: %s (%s)", domain, "live" if live else "offline")
+                first_poll = False
         except urllib.error.HTTPError as exc:
             _report_http_error(exc)
         except Exception as exc:
@@ -554,7 +822,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="run a single poll and exit")
     parser.add_argument(
-        "--dry-run", action="store_true", help="print the page instead of committing it"
+        "--dry-run", action="store_true", help="print the page instead of publishing it"
     )
     parser.add_argument("--log-level", default=_env("LOG_LEVEL", "INFO") or "INFO")
     args = parser.parse_args(argv)
@@ -564,15 +832,12 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    if not args.dry_run:
-        if not config.repo or "/" not in config.repo:
-            raise SystemExit(
-                "PAGES_REPO must be set to the Pages repository as owner/name "
-                "(for example 'yourname/mc'); it is not fixed in the code. "
-                "Use --dry-run to render the page without it."
-            )
-        if not config.token:
-            raise SystemExit("GITHUB_TOKEN is required unless --dry-run is used")
+    if not config.publishing and not args.dry_run:
+        LOG.warning(
+            "nothing to publish: set PAGES_REPO and GITHUB_TOKEN for a page, "
+            "DISCORD_WEBHOOK_URL for a webhook, or both; only link changes "
+            "will be logged"
+        )
 
     try:
         return run(config, dry_run=args.dry_run, once=args.once)

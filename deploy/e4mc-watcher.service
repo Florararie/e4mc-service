@@ -1,5 +1,5 @@
 [Unit]
-Description=e4mc link watcher (local tunnel link -> GitHub Pages)
+Description=e4mc link watcher (tunnel link -> Pages / Discord)
 Documentation=file:@PREFIX@/README.md
 Wants=network-online.target
 After=network-online.target e4mc-tunnel.service
