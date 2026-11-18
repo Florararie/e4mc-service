@@ -337,32 +337,71 @@ def _head_commit(config: WatcherConfig) -> dict | None:
     return commit
 
 
-def sync_page(config: WatcherConfig, content: bytes) -> str | None:
-    """Make ``PAGES_PATH`` equal ``content``.
+def _contents_url(config: WatcherConfig) -> str:
+    return f"{GITHUB_API}/repos/{config.repo}/contents/{urllib.parse.quote(config.path)}"
 
-    Returns None when the published file is already identical, otherwise
-    ``"amended"`` or ``"committed"``. The watcher keeps its own tip commit
-    amended, so an installation that runs indefinitely still leaves one entry
-    in the Pages history. A commit it did not write is never rewritten: the
-    page commit is then simply added on top of it.
-    """
-    url = f"{GITHUB_API}/repos/{config.repo}/contents/{urllib.parse.quote(config.path)}"
+
+def _published_copy(config: WatcherConfig) -> dict | None:
+    """Return the file currently on the branch, or None when it is absent."""
     branch = urllib.parse.quote(config.branch, safe="/")
-    existing: dict | None
     try:
-        existing = _api(config, "GET", f"{url}?ref={branch}")
+        return _api(config, "GET", f"{_contents_url(config)}?ref={branch}")
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
             raise
-        existing = None
-    if existing is not None:
-        try:
-            current = base64.b64decode(existing.get("content") or "")
-        except (ValueError, TypeError):
-            current = b""
-        if current == content:
-            return None
+        return None
 
+
+def _decoded_contents(entry: dict | None) -> bytes:
+    try:
+        return base64.b64decode((entry or {}).get("content") or "")
+    except (ValueError, TypeError):
+        return b""
+
+
+def sync_page(config: WatcherConfig, content: bytes) -> str | None:
+    """Make ``PAGES_PATH`` equal ``content``.
+
+    Returns None when the published page is already identical, otherwise
+    ``"amended"``, ``"committed"`` or ``"written"``. The watcher keeps its own
+    tip commit amended, so an installation that runs indefinitely still leaves
+    one entry in the Pages history. A commit it did not write is never
+    rewritten: the page commit is then simply added on top of it. A token that
+    cannot use the git-data endpoints falls back to a plain contents commit,
+    which keeps the page current but appends instead of amending.
+    """
+    existing = _published_copy(config)
+    if existing is not None and _decoded_contents(existing) == content:
+        return None
+    try:
+        return _publish_commit(config, content)
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (401, 403, 404):
+            raise
+        _report_http_error(exc)
+        LOG.warning(
+            "falling back to a plain contents commit; history will grow again "
+            "until the git-data endpoints are allowed"
+        )
+        return _publish_contents(config, content, existing)
+
+
+def _publish_contents(
+    config: WatcherConfig, content: bytes, existing: dict | None
+) -> str:
+    payload: dict = {
+        "message": config.commit_message,
+        "content": base64.b64encode(content).decode("ascii"),
+        "branch": config.branch,
+    }
+    if existing:
+        payload["sha"] = existing.get("sha")
+    _api(config, "PUT", _contents_url(config), payload)
+    return "written"
+
+
+def _publish_commit(config: WatcherConfig, content: bytes) -> str:
+    """Create the page commit through the git-data API, amending when possible."""
     head = _head_commit(config)
     # Only rewrite a commit this watcher wrote itself, identified by its
     # message; anything else (your own edits, a merge) gets a normal commit on
@@ -452,7 +491,12 @@ def _report_http_error(exc: urllib.error.HTTPError) -> None:
         detail = exc.read().decode("utf-8", "replace")[:500]
     except Exception:
         detail = ""
-    LOG.error("GitHub API returned HTTP %s: %s", exc.code, detail)
+    LOG.error(
+        "GitHub API returned HTTP %s for %s: %s",
+        exc.code,
+        getattr(exc, "url", "?"),
+        detail,
+    )
 
 
 def run(config: WatcherConfig, *, dry_run: bool = False, once: bool = False) -> int:

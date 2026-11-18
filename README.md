@@ -152,7 +152,10 @@ watcher amends its own previous commit instead of adding another one, so the
 Pages branch keeps a single entry however many times the address changes. It
 recognises that commit by the message it wrote, and it always builds the new
 tree on the branch's current one, so commits you push by hand are never
-rewritten: they stay, and the page commit is added on top of them.
+rewritten: they stay, and the page commit is added on top of them. If the
+token is refused on the git-data endpoints, the watcher logs the exact request
+and falls back to a plain contents commit: the page still updates, but the
+history starts growing again until that is fixed.
 
 Commits are authored and committed as `GitHub <noreply@github.com>` by default,
 the identity GitHub's own web editor and API use, so the history does not name
