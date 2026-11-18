@@ -226,6 +226,7 @@ PAGE = """<!doctype html>
     --muted: #5b616b;
     --panel: #f5f6f7;
     --line: #dfe3e8;
+    --line-strong: #c6cdd6;
     --focus: #33663f;
     --ok: #16a34a;
     --ok-ring: rgba(22, 163, 74, .16);
@@ -243,6 +244,7 @@ PAGE = """<!doctype html>
       --muted: #9aa1ab;
       --panel: #1b1f24;
       --line: #2a2f36;
+      --line-strong: #3c434d;
       --focus: #8fd39b;
       --ok: #4ade80;
       --ok-ring: rgba(74, 222, 128, .18);
@@ -307,33 +309,83 @@ PAGE = """<!doctype html>
     }
   }
   .lede { margin: 0 0 1.6rem; color: var(--muted); }
-  .address {
-    display: block;
-    width: 100%;
-    padding: 1rem 1.1rem;
+  .address-bar {
+    position: relative;
+    display: flex;
+    align-items: center;
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: .625rem;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  .address-bar:hover,
+  .address-bar:focus-within { border-color: var(--line-strong); }
+  .address-bar[data-state="offline"] { border-style: dashed; }
+  .address {
+    flex: 1;
+    min-width: 0;
+    padding: 1rem 3.15rem 1rem 1.1rem;
     font: 600 1.125rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     overflow-wrap: anywhere;
     user-select: all;
   }
-  .address[data-state="offline"] { color: var(--muted); border-style: dashed; }
-  .actions { margin: .75rem 0 0; }
-  button {
-    min-height: 2.75rem;
-    padding: .55rem 1.15rem;
-    font: inherit;
-    font-weight: 600;
-    color: var(--bg);
-    background: var(--fg);
-    border: 1px solid var(--fg);
-    border-radius: .5rem;
+  .address-bar[data-state="offline"] .address { color: var(--muted); }
+  .copy {
+    position: absolute;
+    top: 50%;
+    right: .55rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.1rem;
+    height: 2.1rem;
+    padding: 0;
+    transform: translateY(-50%);
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: .45rem;
     cursor: pointer;
+    opacity: 0;
+    transition: opacity .16s ease, background-color .16s ease, border-color .16s ease,
+                color .16s ease, transform .1s ease;
   }
-  button:hover { opacity: .86; }
-  button:active { transform: translateY(1px); }
-  button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .address-bar:hover .copy,
+  .address-bar:focus-within .copy,
+  .address-bar[data-feedback] .copy { opacity: 1; }
+  .copy:hover { color: var(--fg); background: var(--card); border-color: var(--line-strong); }
+  .copy:active { transform: translateY(-50%) scale(.94); }
+  .copy:focus-visible { opacity: 1; outline: 2px solid var(--focus); outline-offset: 2px; }
+  .copy svg { display: block; width: 1.05rem; height: 1.05rem; }
+  .copy .icon-check { display: none; }
+  .address-bar[data-feedback="copied"] .copy {
+    color: var(--ok-text);
+    background: var(--ok-ring);
+    border-color: transparent;
+  }
+  .address-bar[data-feedback="copied"] .icon-copy { display: none; }
+  .address-bar[data-feedback="copied"] .icon-check { display: block; }
+  .copy-tip {
+    position: absolute;
+    right: .35rem;
+    bottom: calc(100% + .4rem);
+    padding: .3rem .55rem;
+    font-size: .78rem;
+    font-weight: 600;
+    line-height: 1.25;
+    white-space: nowrap;
+    color: var(--card);
+    background: var(--fg);
+    border-radius: .35rem;
+    opacity: 0;
+    transform: translateY(.2rem);
+    pointer-events: none;
+    transition: opacity .16s ease, transform .16s ease;
+  }
+  .address-bar[data-feedback] .copy-tip { opacity: 1; transform: none; }
+  @media (hover: none) {
+    .copy { opacity: .6; }
+  }
   .note { margin: 1.4rem 0 0; color: var(--muted); font-size: .95rem; }
   .note code { font-size: .92em; }
   .note.offline {
@@ -369,8 +421,19 @@ PAGE = """<!doctype html>
   </p>
   <p class="lede">Paste this address into Minecraft to join.</p>
 
-  <code class="address" id="address" data-state="__STATUS__">__DOMAIN__</code>
-  <p class="actions"><button id="copy" type="button">Copy address</button></p>
+  <div class="address-bar" id="address-bar" data-state="__STATUS__">
+    <code class="address" id="address">__DOMAIN__</code>
+    <span class="copy-tip" id="copy-tip" role="status"></span>
+    <button class="copy" id="copy" type="button" aria-label="Copy server address">
+      <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <rect x="9" y="9" width="12" height="12" rx="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+      <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d="M4 12.5l5 5L20 6.5"></path>
+      </svg>
+    </button>
+  </div>
   __OFFLINE_NOTE__
 
   <p class="note"><strong>Multiplayer &rarr; Direct Connection</strong>, paste,
@@ -389,16 +452,34 @@ PAGE = """<!doctype html>
   </footer>
 </main>
 <script>
+const bar = document.getElementById("address-bar");
 const address = document.getElementById("address");
-const button = document.getElementById("copy");
-const label = button.textContent.trim();
-button.addEventListener("click", async () => {
+const copy = document.getElementById("copy");
+const tip = document.getElementById("copy-tip");
+let feedbackTimer;
+
+const feedback = (state, message) => {
+  bar.dataset.feedback = state;
+  tip.textContent = message;
+  clearTimeout(feedbackTimer);
+  feedbackTimer = setTimeout(() => {
+    delete bar.dataset.feedback;
+    tip.textContent = "";
+    copy.setAttribute("aria-label", "Copy server address");
+  }, 2000);
+};
+
+const copyAddress = async () => {
   const text = address.textContent.trim();
-  let copied = true;
   try {
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
   } catch (error) {
-    copied = false;
+    /* fall through to selecting the text */
+  }
+  try {
     const range = document.createRange();
     range.selectNodeContents(address);
     const selection = getSelection();
@@ -406,9 +487,20 @@ button.addEventListener("click", async () => {
       selection.removeAllRanges();
       selection.addRange(range);
     }
+    return document.execCommand("copy");
+  } catch (error) {
+    return false;
   }
-  button.textContent = copied ? "Copied" : "Selected, press Ctrl/Cmd+C";
-  setTimeout(() => { button.textContent = label; }, 2200);
+};
+
+copy.addEventListener("click", async () => {
+  if (await copyAddress()) {
+    feedback("copied", "Copied");
+    copy.setAttribute("aria-label", "Address copied");
+  } else {
+    feedback("manual", "Press Ctrl/Cmd+C");
+    copy.setAttribute("aria-label", "Address selected, press Ctrl/Cmd+C");
+  }
 });
 
 const stamp = document.querySelector("time[data-relative]");

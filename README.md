@@ -60,6 +60,7 @@ The watcher notices and publishes the new address.
 | `install.sh` | Installs the tunnel, the watcher when a destination is configured, the venv, the env file and the units |
 | `uninstall.sh` | Stops and removes both services; `--purge` also deletes config and state |
 | `.env.example` | Every setting with its default |
+| `sample-page.html` | Standalone preview of the published page (live and offline cards) for checking markup and the copy hover locally |
 
 ## Install (systemd, one machine)
 
@@ -206,8 +207,9 @@ commit either way.
 
 The page is a small raised card: a status line (green dot and `Live`, or red dot
 and `Offline`) with the time the address last changed, the bare address in a
-selectable block, a copy button, and a short reminder to paste the address
-rather than the page's URL. The relative time ("3 hours ago") is rendered by a
+selectable block with a copy icon that appears on hover or keyboard focus
+(clicking it shows a brief "Copied" confirmation), and a short reminder to
+paste the address rather than the page's URL. The relative time ("3 hours ago") is rendered by a
 few lines of script, with the exact UTC time as the no-JS fallback and the
 hover text; the page refreshes itself once a minute, so an open tab follows
 both a new address and a change in status. It deliberately carries no
