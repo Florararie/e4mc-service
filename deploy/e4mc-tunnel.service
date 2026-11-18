@@ -11,6 +11,8 @@ User=@USER@
 Group=@GROUP@
 WorkingDirectory=@PREFIX@
 EnvironmentFile=-/etc/e4mc/e4mc.env
+# The publishing settings share that file; this process never uses them.
+UnsetEnvironment=GITHUB_TOKEN DISCORD_WEBHOOK_URL
 Environment=STATE_DIR=@STATE_DIR@
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -21,6 +23,17 @@ StateDirectory=e4mc
 TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@STATE_DIR@
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

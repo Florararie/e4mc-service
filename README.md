@@ -87,6 +87,12 @@ under `/opt/e4mc`, builds the venv, writes `/etc/e4mc/e4mc.env` (mode 0600),
 renders the units and starts them. Without a page or webhook destination it
 installs only `e4mc-tunnel.service`.
 
+Both units run under `ProtectSystem=strict` with a private `/tmp`, no
+capabilities and only internet/unix sockets; the tunnel additionally drops
+`GITHUB_TOKEN` and `DISCORD_WEBHOOK_URL` from its environment, so the process
+that parses relay traffic never holds the publishing secrets. Keep
+`--state-dir` outside `/home`, which the units make inaccessible.
+
 Options (`sudo ./install.sh --help` lists them all):
 
 | Option | Default | Meaning |
@@ -284,6 +290,15 @@ mcstatus word-word.na.e4mc.link status
   marks it offline.
 * The GitHub token must be able to write the repository; a read-only or
   expired token keeps retrying and logs the API error each poll.
+* Every player appears to the server as `127.0.0.1`: the relay hands over a
+  bare byte stream with no source address, and vanilla Minecraft has no PROXY
+  header to carry one. Ban by UUID, not IP. On Paper/Spigot, raise or disable
+  `connection-throttle`, which counts all players as a single address and will
+  kick friends who join within a few seconds of each other.
+* The relay's TLS certificate is not validated, matching the e4mc mod. An
+  online-mode server is still protected: Minecraft encrypts the session end to
+  end, so the relay path cannot read or change game traffic. An offline-mode
+  server would have no such protection.
 * One install serves one address. A second Minecraft server needs its own copy
   with renamed units and a separate state directory.
 * A GitHub Pages URL can never be typed into Minecraft, only the bare e4mc

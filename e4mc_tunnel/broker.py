@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from .config import TunnelConfig
 
 LOG = logging.getLogger("e4mc.broker")
-USER_AGENT = "e4mc-tunnel/1.0 (+https://github.com/Florararie/mc)"
+USER_AGENT = "e4mc-tunnel/1.0 (+https://github.com/Florararie/e4mc-service)"
 
 
 @dataclass(frozen=True)

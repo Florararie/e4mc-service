@@ -1,1 +1,3 @@
-aioquic>=1.8,<2
+# Pinned exactly: the tunnel reads aioquic's per-stream send buffer to apply
+# backpressure, and it warns (rather than silently degrading) if that moves.
+aioquic==1.8.0

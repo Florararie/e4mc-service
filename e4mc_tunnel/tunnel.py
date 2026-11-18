@@ -56,6 +56,7 @@ class RelayProtocol(QuicConnectionProtocol):
         self._control_writer: asyncio.StreamWriter | None = None
         self._finished = asyncio.Event()
         self._player_tasks: set[asyncio.Task] = set()
+        self._backpressure_warned = False
 
     # -- QUIC events ------------------------------------------------------
 
@@ -163,6 +164,7 @@ class RelayProtocol(QuicConnectionProtocol):
             return
 
         LOG.info("player connected, proxying to %s:%s", config.mc_host, config.mc_port)
+        self._check_backpressure(writer)
         up = asyncio.create_task(self._pump(reader, tcp_writer), name="player->mc")
         down = asyncio.create_task(
             self._pump(tcp_reader, writer, self._quic_pending(writer)), name="mc->player"
@@ -200,6 +202,28 @@ class RelayProtocol(QuicConnectionProtocol):
         except (ConnectionError, OSError, RuntimeError):
             # Either side going away is normal; the other pump shuts down too.
             pass
+
+    def _check_backpressure(self, writer: asyncio.StreamWriter) -> None:
+        """Warn once if this aioquic version no longer exposes the send buffer.
+
+        ``_quic_pending`` reads aioquic's stream sender directly. A 1.x release
+        may move that attribute, in which case reads would silently return 0 and
+        the memory cap would quietly stop working; say so instead.
+        """
+        if self._backpressure_warned:
+            return
+        streams = getattr(self._quic, "_streams", None)
+        stream_id = writer.get_extra_info("stream_id")
+        stream = streams.get(stream_id) if isinstance(streams, dict) else None
+        sender = getattr(stream, "sender", None)
+        if getattr(sender, "buffer", None) is not None:
+            return
+        self._backpressure_warned = True
+        LOG.warning(
+            "this aioquic version does not expose the stream send buffer; "
+            "the %d MiB player backpressure limit is inactive",
+            _QUIC_PENDING_LIMIT >> 20,
+        )
 
     def _quic_pending(self, writer: asyncio.StreamWriter):
         """Bytes queued for the peer on this QUIC stream, or ``None`` for TCP."""
@@ -313,6 +337,9 @@ async def supervise(config: TunnelConfig) -> None:
             wait = min(delay, config.reconnect_max) + random.uniform(0.0, 1.0)
             LOG.info("tunnel %s after %.0fs; reconnecting in %.1fs", outcome, lived, wait)
             await asyncio.sleep(wait)
-            delay = min(max(delay * 2, config.reconnect_min), config.reconnect_max)
+            # Grow from at most 1 s, never from reconnect_min: with
+            # RECONNECT_MIN=0 the first retry is immediate, but every retry
+            # after it still backs off instead of hammering the relay.
+            delay = min(max(delay * 2, 1.0), config.reconnect_max)
     finally:
         await session.close()

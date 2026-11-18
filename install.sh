@@ -157,8 +157,9 @@ if [[ $WRITE_ENV -eq 1 ]]; then
     umask 077
     cat >"$ENV_FILE" <<EOF
 # Read by e4mc-tunnel.service and e4mc-watcher.service. Keep this private:
-# it holds the GitHub token and the Discord webhook. STATE_DIR is fixed by
-# --state-dir in both units. Blank publisher settings are simply skipped.
+# it holds the GitHub token and the Discord webhook. The tunnel unit unsets
+# both, so only the watcher ever has them in its environment. STATE_DIR is
+# fixed by --state-dir in both units; blank publisher settings are skipped.
 MC_HOST=$MC_HOST
 MC_PORT=$MC_PORT
 BROKER_URL=https://broker.e4mc.link/getBestRelay
