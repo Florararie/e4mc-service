@@ -1,3 +1,4 @@
-# Pinned exactly: the tunnel reads aioquic's per-stream send buffer to apply
-# backpressure, and it warns (rather than silently degrading) if that moves.
+# Pinned exactly: the tunnel reads aioquic's per-stream send buffer
+# (QuicStreamSender._buffer, the only accessor in 1.8.0) to apply backpressure,
+# and it warns rather than silently degrading if an upgrade moves that field.
 aioquic==1.8.0

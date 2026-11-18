@@ -42,6 +42,21 @@ _HALF_CLOSE_GRACE = 15.0
 _SESSION_HEALTHY_AFTER = 60.0
 
 
+def _sender_buffer(sender) -> bytearray | None:
+    """Bytes written to a QUIC stream that the peer has not acknowledged yet.
+
+    1.8.0 keeps them in ``QuicStreamSender._buffer`` (trimmed as ACKs arrive);
+    the asyncio ``QuicStreamAdapter`` handed out as the stream's transport has
+    no write-buffer size, so there is no public accessor. requirements.txt pins
+    the version this field is read from, and ``_check_backpressure`` warns if an
+    upgrade moves it.
+    """
+    buffer = getattr(sender, "buffer", None)
+    if buffer is None:
+        buffer = getattr(sender, "_buffer", None)
+    return buffer if isinstance(buffer, bytearray) else None
+
+
 class RelayProtocol(QuicConnectionProtocol):
     """One QUIC connection to the relay, including its player streams."""
 
@@ -203,20 +218,23 @@ class RelayProtocol(QuicConnectionProtocol):
             # Either side going away is normal; the other pump shuts down too.
             pass
 
+    def _player_stream(self, writer: asyncio.StreamWriter):
+        """The QUIC stream backing one player's writer, if it is still known."""
+        streams = getattr(self._quic, "_streams", None)
+        stream_id = writer.get_extra_info("stream_id")
+        return streams.get(stream_id) if isinstance(streams, dict) else None
+
     def _check_backpressure(self, writer: asyncio.StreamWriter) -> None:
         """Warn once if this aioquic version no longer exposes the send buffer.
 
-        ``_quic_pending`` reads aioquic's stream sender directly. A 1.x release
-        may move that attribute, in which case reads would silently return 0 and
-        the memory cap would quietly stop working; say so instead.
+        ``_quic_pending`` reads aioquic's stream sender directly. If an upgrade
+        moves that field, reads would silently return 0 and the memory cap would
+        quietly stop working; say so instead.
         """
         if self._backpressure_warned:
             return
-        streams = getattr(self._quic, "_streams", None)
-        stream_id = writer.get_extra_info("stream_id")
-        stream = streams.get(stream_id) if isinstance(streams, dict) else None
-        sender = getattr(stream, "sender", None)
-        if getattr(sender, "buffer", None) is not None:
+        sender = getattr(self._player_stream(writer), "sender", None)
+        if _sender_buffer(sender) is not None:
             return
         self._backpressure_warned = True
         LOG.warning(
@@ -227,13 +245,12 @@ class RelayProtocol(QuicConnectionProtocol):
 
     def _quic_pending(self, writer: asyncio.StreamWriter):
         """Bytes queued for the peer on this QUIC stream, or ``None`` for TCP."""
-        stream_id = writer.get_extra_info("stream_id")
-        if stream_id is None:
+        if writer.get_extra_info("stream_id") is None:
             return None
 
         def pending() -> int:
-            stream = getattr(self._quic, "_streams", {}).get(stream_id)
-            buffer = getattr(getattr(stream, "sender", None), "buffer", None)
+            sender = getattr(self._player_stream(writer), "sender", None)
+            buffer = _sender_buffer(sender)
             return len(buffer) if buffer is not None else 0
 
         return pending
