@@ -202,12 +202,16 @@ fi
 
 log "installing units"
 for unit in "${UNITS[@]}"; do
+    # $unit already carries the .service suffix. Render to a temporary file so
+    # a bad template cannot truncate a working unit before the script stops.
+    rendered=$(mktemp)
     sed -e "s|@PREFIX@|$PREFIX|g" \
         -e "s|@STATE_DIR@|$STATE_DIR|g" \
         -e "s|@USER@|$SERVICE_USER|g" \
         -e "s|@GROUP@|$SERVICE_GROUP|g" \
-        "$SOURCE/deploy/$unit.service" >"/etc/systemd/system/$unit.service"
-    chmod 0644 "/etc/systemd/system/$unit.service"
+        "$SOURCE/deploy/$unit" >"$rendered"
+    install -m 0644 "$rendered" "/etc/systemd/system/$unit"
+    rm -f "$rendered"
 done
 if [[ $WATCHER -eq 0 && -e /etc/systemd/system/e4mc-watcher.service ]]; then
     log "disabling the watcher unit from an earlier install"
