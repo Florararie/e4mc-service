@@ -1,7 +1,7 @@
 # e4mc headless tunnel + Pages link
 
 Exposes a Minecraft server through the public [e4mc](https://e4mc.link) relay
-without opening a port, and keeps a static redirect page pointed at whatever
+without opening a port, and keeps a small static page pointed at whatever
 address the relay currently hands out.
 
 Both halves run on the same machine as the Minecraft server:
@@ -17,7 +17,7 @@ Minecraft server <--TCP--> e4mc tunnel <--QUIC--> public relay <---> players
 The tunnel is an ordinary outbound client: no mod, no port forward, no inbound
 firewall rule. The watcher learns the link from the tunnel's state file on the
 same disk, so the only thing that leaves the machine is the commit that updates
-the redirect page.
+the page.
 
 ## What the relay actually does
 
@@ -43,14 +43,14 @@ The behaviour below is reimplemented from the e4mc mod
 Keepalive pings run every 15 s. If the connection dies, the relay drops the
 routing entry, so the address is gone: the supervisor reconnects with
 exponential backoff, obtains a **new** address, and rewrites the state file.
-The watcher notices and commits the new redirect.
+The watcher notices and publishes the new address.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `e4mc_tunnel/` | QUIC client, per-player stream proxy, atomic `state.json`/`link.txt`, keepalive, heartbeat, backoff reconnect |
-| `e4mc_watcher/` | Reads the link from local state and commits the redirect page through the GitHub Contents API |
+| `e4mc_watcher/` | Reads the link from local state and commits the landing page through the GitHub Contents API |
 | `deploy/*.service` | Unit templates (`@PREFIX@`, `@USER@`, `@STATE_DIR@` substituted at install time) |
 | `install.sh` | Installs both services, the venv, the env file and the units |
 | `uninstall.sh` | Stops and removes both services; `--purge` also deletes config and state |
@@ -72,7 +72,7 @@ Options (`sudo ./install.sh --help` lists them all):
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--repo OWNER/NAME` | required | repository whose Pages site gets the redirect |
+| `--repo OWNER/NAME` | required | repository whose Pages site gets the page |
 | `--token-file PATH` / `--token VALUE` | required | token with Contents: Read and write |
 | `--prefix DIR` | `/opt/e4mc` | install directory |
 | `--state-dir DIR` | `/var/lib/e4mc` | shared state directory |
@@ -158,10 +158,13 @@ the repository, so a stable link produces no commits.
 3. Point `--repo` at it; the watcher creates `index.html` on its first run and
    Pages serves it about a minute later.
 
-The page asks the browser to open `minecraft://<address>` (meta refresh and
-script) and shows the bare address with a copy button. Browsers usually cannot
-launch Minecraft from a web page, so the printed address is the reliable path;
-`REDIRECT_URL_TEMPLATE` lets you change the scheme.
+The page is a plain landing page: the bare address in a selectable block, a
+copy button, and a short reminder to paste the address rather than the page's
+URL. It refreshes itself once a minute, so a tab left open picks up a new link.
+It deliberately carries no game-launch link: Java Edition registers no
+`minecraft://` handler, so such a link can never open the game. The footer
+credits the `PAGE_AUTHOR` GitHub account (default `Florararie`) and the e4mc
+project, mod and relay.
 
 ### The Pages URL is not a server address
 
@@ -201,9 +204,9 @@ See `.env.example` for the annotated list. The ones that usually matter:
 | `HEARTBEAT_INTERVAL` | `20` | state refresh while connected |
 | `GITHUB_TOKEN`, `PAGES_REPO` | none | required for commits |
 | `PAGES_BRANCH`, `PAGES_PATH` | `main`, `index.html` | where the page lives |
+| `PAGE_AUTHOR` | `Florararie` | GitHub username credited in the page footer |
 | `POLL_INTERVAL` | `5` | how often the watcher reads local state |
 | `STATE_MAX_AGE` | `90` | freshness required before publishing |
-| `REDIRECT_URL_TEMPLATE` | `minecraft://{domain}` | page target |
 
 ## Verify
 
