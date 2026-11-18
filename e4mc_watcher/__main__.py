@@ -317,24 +317,35 @@ def _api(config: WatcherConfig, method: str, url: str, payload: dict | None = No
 
 
 def _branch_url(config: WatcherConfig) -> str:
+    """The reference this watcher updates (``git/refs`` is the write path)."""
     branch = urllib.parse.quote(config.branch, safe="/")
-    return f"{GITHUB_API}/repos/{config.repo}/git/ref/heads/{branch}"
+    return f"{GITHUB_API}/repos/{config.repo}/git/refs/heads/{branch}"
 
 
 def _head_commit(config: WatcherConfig) -> dict | None:
-    """Return the tip commit of the Pages branch, or None while it is unborn."""
+    """Return the tip commit of the Pages branch, or None while it is unborn.
+
+    Read through the commits API rather than the git-data ``git/ref`` endpoint:
+    that is the one read a token with Contents access is always granted, and a
+    token refused there still publishes the page.
+    """
+    branch = urllib.parse.quote(config.branch, safe="/")
     try:
-        ref = _api(config, "GET", _branch_url(config))
+        data = _api(config, "GET", f"{GITHUB_API}/repos/{config.repo}/commits/{branch}")
     except urllib.error.HTTPError as exc:
         if exc.code in (404, 409):
             return None
         raise
-    sha = str((ref.get("object") or {}).get("sha") or "").strip()
+    sha = str(data.get("sha") or "").strip()
     if not sha:
         return None
-    commit = _api(config, "GET", f"{GITHUB_API}/repos/{config.repo}/git/commits/{sha}")
-    commit["sha"] = sha
-    return commit
+    commit = data.get("commit") or {}
+    return {
+        "sha": sha,
+        "message": commit.get("message") or "",
+        "tree": {"sha": (commit.get("tree") or {}).get("sha")},
+        "parents": list(data.get("parents") or []),
+    }
 
 
 def _contents_url(config: WatcherConfig) -> str:

@@ -149,13 +149,15 @@ dead address.
 The commit only happens when the rendered page differs from the file already in
 the repository, so a stable link produces no commits. When it does commit, the
 watcher amends its own previous commit instead of adding another one, so the
-Pages branch keeps a single entry however many times the address changes. It
+Pages branch keeps a single entry however many times the address changes (it
+amends only the tip, so commits already in the history are not rewritten). It
 recognises that commit by the message it wrote, and it always builds the new
 tree on the branch's current one, so commits you push by hand are never
 rewritten: they stay, and the page commit is added on top of them. If the
 token is refused on the git-data endpoints, the watcher logs the exact request
 and falls back to a plain contents commit: the page still updates, but the
-history starts growing again until that is fixed.
+history starts growing again, and those commits are attributed to the token's
+owner because the contents API takes no author.
 
 Commits are authored and committed as `GitHub <noreply@github.com>` by default,
 the identity GitHub's own web editor and API use, so the history does not name
